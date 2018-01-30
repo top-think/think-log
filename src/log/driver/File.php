@@ -17,11 +17,17 @@ namespace think\log\driver;
 class File
 {
     protected $config = [
+        // 时间记录格式
         'time_format' => ' c ',
+        // 时间记录格式
         'single'      => false,
+        // 日志文件大小限制（超出会生成多个文件）
         'file_size'   => 2097152,
+        // 日志储存路径
         'path'        => '',
+        // 日志储存路径
         'apart_level' => [],
+        // 调试开关
         'debug'       => false,
     ];
 
