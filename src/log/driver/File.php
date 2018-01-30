@@ -22,6 +22,7 @@ class File
         'file_size'   => 2097152,
         'path'        => '',
         'apart_level' => [],
+        'debug'       => false,
     ];
 
     protected $writed = [];
