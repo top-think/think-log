@@ -204,7 +204,7 @@ class Log implements LoggerInterface
     }
 
     /**
-     * 实时写入日志信息 并支持行为
+     * 实时写入日志信息
      * @access public
      * @param  mixed  $msg   调试信息
      * @param  string $type  日志级别
