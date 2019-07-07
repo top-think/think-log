@@ -19,7 +19,7 @@ use think\Container;
 /**
  * 日志管理类
  */
-class Log implements LoggerInterface
+class LogManager implements LoggerInterface
 {
     const EMERGENCY = 'emergency';
     const ALERT     = 'alert';
@@ -81,10 +81,10 @@ class Log implements LoggerInterface
     protected $isCli = false;
 
     /**
-     * 构造方法
+     * 初始化
      * @access public
      */
-    public function __construct(array $config = [])
+    public function init(array $config = [])
     {
         $this->config = $config;
 
