@@ -2,26 +2,23 @@
 // +----------------------------------------------------------------------
 // | ThinkPHP [ WE CAN DO IT JUST THINK ]
 // +----------------------------------------------------------------------
-// | Copyright (c) 2006~2017 http://thinkphp.cn All rights reserved.
+// | Copyright (c) 2006~2019 http://thinkphp.cn All rights reserved.
 // +----------------------------------------------------------------------
 // | Licensed ( http://www.apache.org/licenses/LICENSE-2.0 )
 // +----------------------------------------------------------------------
 // | Author: liu21st <liu21st@gmail.com>
 // +----------------------------------------------------------------------
+declare (strict_types = 1);
 
 namespace think;
 
-use Exception;
+use InvalidArgumentException;
+use Psr\Log\LoggerInterface;
+use think\Container;
 
-// 实现日志接口
-if (interface_exists('Psr\Log\LoggerInterface')) {
-    interface LoggerInterface extends \Psr\Log\LoggerInterface
-    {}
-} else {
-    interface LoggerInterface
-    {}
-}
-
+/**
+ * 日志管理类
+ */
 class Log implements LoggerInterface
 {
     const EMERGENCY = 'emergency';
@@ -41,6 +38,12 @@ class Log implements LoggerInterface
     protected $log = [];
 
     /**
+     * 日志通道
+     * @var array
+     */
+    protected $channel = [];
+
+    /**
      * 配置参数
      * @var array
      */
@@ -48,49 +51,158 @@ class Log implements LoggerInterface
 
     /**
      * 日志写入驱动
-     * @var object
+     * @var array
      */
-    protected $driver;
+    protected $driver = [];
 
     /**
-     * 日志授权key
-     * @var string
+     * 日志处理
+     *
+     * @var array
      */
-    protected $key;
+    protected $processor = [];
 
     /**
-     * 日志初始化
+     * 关闭日志（渠道）
+     * @var array
+     */
+    protected $close = [];
+
+    /**
+     * （通道）允许写入类型
+     * @var array
+     */
+    protected $allow = [];
+
+    /**
+     * 是否控制台执行
+     * @var bool
+     */
+    protected $isCli = false;
+
+    /**
+     * 构造方法
      * @access public
-     * @param  array $config
-     * @return $this
      */
-    public function init($config = [])
+    public function __construct(array $config = [])
     {
-        $type  = isset($config['type']) ? $config['type'] : 'File';
-        $class = false !== strpos($type, '\\') ? $type : '\\think\\log\\driver\\' . ucwords($type);
-
         $this->config = $config;
 
-        unset($config['type']);
-
-        if (class_exists($class)) {
-            $this->driver = new $class($config);
-        } else {
-            throw new Exception('class not exists:' . $class, $class);
+        if (isset($this->config['processor'])) {
+            $this->processor($this->config['processor']);
         }
 
+        if (!empty($this->config['close'])) {
+            $this->close['*'] = true;
+        }
+
+        if (!empty($this->config['level'])) {
+            $this->allow['*'] = $this->config['level'];
+        }
+
+        $this->isCli = $this->runningInConsole();
+        $this->channel();
+    }
+
+    /**
+     * 是否运行在命令行下
+     * @return bool
+     */
+    public function runningInConsole()
+    {
+        return php_sapi_name() === 'cli' || php_sapi_name() === 'phpdbg';
+    }
+
+    /**
+     * 获取日志配置
+     * @access public
+     * @return array
+     */
+    public function getConfig(): array
+    {
+        return $this->config;
+    }
+
+    /**
+     * 注册一个日志回调处理
+     *
+     * @param  callable $callback 回调
+     * @param  string   $channel  日志通道名
+     * @return void
+     */
+    public function processor(callable $callback, string $channel = '*'): void
+    {
+        $this->processor[$channel][] = $callback;
+    }
+
+    /**
+     * 切换日志通道
+     * @access public
+     * @param  string|array $name 日志通道名
+     * @return $this
+     */
+    public function channel($name = '')
+    {
+        if ('' == $name) {
+            $name = $this->config['default'] ?? 'think';
+        }
+
+        $names = (array) $name;
+
+        foreach ($names as $name) {
+            if (!isset($this->config['channels'][$name])) {
+                throw new InvalidArgumentException('Undefined log config:' . $name);
+            }
+
+            $config = $this->config['channels'][$name];
+
+            if (!empty($config['processor'])) {
+                $this->processor($config['processor'], $name);
+            }
+
+            if (!empty($config['close'])) {
+                $this->close[$name] = true;
+            }
+
+            if (!empty($config['level'])) {
+                $this->allow[$name] = $config['level'];
+            }
+        }
+
+        $this->channel = $names;
         return $this;
+    }
+
+    /**
+     * 实例化日志写入驱动
+     * @access public
+     * @param  string $name 日志通道名
+     * @return object
+     */
+    protected function driver(string $name)
+    {
+        if (!isset($this->driver[$name])) {
+            $config = $this->config['channels'][$name];
+            $type   = !empty($config['type']) ? $config['type'] : 'File';
+
+            $config['is_cli'] = $this->isCli;
+
+            $this->driver[$name] = Container::factory($type, '\\think\\log\\driver\\', $config);
+        }
+
+        return $this->driver[$name];
     }
 
     /**
      * 获取日志信息
      * @access public
-     * @param  string $type 信息类型
+     * @param  string $channel 日志通道
      * @return array
      */
-    public function getLog($type = '')
+    public function getLog(string $channel = ''): array
     {
-        return $type ? $this->log[$type] : $this->log;
+        $channel = $channel ?: array_shift($this->channel);
+        return $this->log[$channel] ?? [];
     }
 
     /**
@@ -101,9 +213,13 @@ class Log implements LoggerInterface
      * @param  array  $context   替换内容
      * @return $this
      */
-    public function record($msg, $type = 'info', array $context = [])
+    public function record($msg, string $type = 'info', array $context = [])
     {
-        if (is_string($msg)) {
+        if (!empty($this->allow['*']) && !in_array($type, $this->allow['*'])) {
+            return $this;
+        }
+
+        if (is_string($msg) && !empty($context)) {
             $replace = [];
             foreach ($context as $key => $val) {
                 $replace['{' . $key . '}'] = $val;
@@ -112,95 +228,122 @@ class Log implements LoggerInterface
             $msg = strtr($msg, $replace);
         }
 
-        $this->log[$type][] = $msg;
+        if (isset($this->config['type_channel'][$type])) {
+            $channels = (array) $this->config['type_channel'][$type];
+        } else {
+            $channels = $this->channel;
+        }
 
-        if (PHP_SAPI == 'cli') {
-            // 命令行日志实时写入
-            $this->save();
+        foreach ($channels as $channel) {
+            if (empty($this->allow[$channel]) || in_array($type, $this->allow[$channel])) {
+                $this->channelLog($channel, $msg, $type);
+            }
         }
 
         return $this;
+    }
+
+    /**
+     * 记录通道日志
+     * @access public
+     * @param  string $channel 日志通道
+     * @param  mixed  $msg  日志信息
+     * @param  string $type 日志级别
+     * @return void
+     */
+    protected function channelLog(string $channel, $msg, string $type): void
+    {
+        if (!empty($this->close['*']) || !empty($this->close[$channel])) {
+            return;
+        }
+
+        if ($this->isCli || !empty($this->config['channels'][$channel]['realtime_write'])) {
+            // 实时写入
+            $this->write($msg, $type, true, $channel);
+        } else {
+            $this->log[$channel][$type][] = $msg;
+        }
     }
 
     /**
      * 清空日志信息
      * @access public
+     * @param  string  $channel 日志通道名
      * @return $this
      */
-    public function clear()
+    public function clear(string $channel = '')
     {
-        $this->log = [];
+        if ($channel) {
+            $this->log[$channel] = [];
+        } else {
+            $this->log = [];
+        }
 
         return $this;
     }
 
     /**
-     * 当前日志记录的授权key
+     * 关闭本次请求日志写入
      * @access public
-     * @param  string  $key  授权key
+     * @param  string  $channel 日志通道名
      * @return $this
      */
-    public function key($key)
+    public function close(string $channel = '*')
     {
-        $this->key = $key;
+        $this->close[$channel] = true;
+
+        $this->clear('*' == $channel ? '' : $channel);
 
         return $this;
     }
 
     /**
-     * 检查日志写入权限
+     * 保存日志信息
      * @access public
-     * @param  array  $config  当前日志配置参数
      * @return bool
      */
-    public function check($config)
+    public function save(): bool
     {
-        if ($this->key && !empty($config['allow_key']) && !in_array($this->key, $config['allow_key'])) {
-            return false;
+        if (!empty($this->close['*'])) {
+            return true;
+        }
+
+        foreach ($this->log as $channel => $logs) {
+            if (!empty($this->close[$channel])) {
+                continue;
+            }
+
+            $result = $this->saveChannel($channel, $logs);
+
+            if ($result) {
+                $this->log[$channel] = [];
+            }
         }
 
         return true;
     }
 
     /**
-     * 保存调试信息
-     * @access public
+     * 保存某个通道的日志信息
+     * @access protected
+     * @param  string $channel 日志通道名
+     * @param  array  $log    日志信息
      * @return bool
      */
-    public function save()
+    protected function saveChannel(string $channel, array $log = []): bool
     {
-        if (!empty($this->log)) {
+        // 日志处理
+        $processors = array_merge($this->processor[$channel] ?? [], $this->processor['*'] ?? []);
 
-            if (!$this->check($this->config)) {
-                // 检测日志写入权限
+        foreach ($processors as $callback) {
+            $log = $callback($log, $channel);
+
+            if (false === $log) {
                 return false;
             }
-
-            if (empty($this->config['level'])) {
-                // 获取全部日志
-                $log = $this->log;
-                if (!$this->config['debug'] && isset($log['debug'])) {
-                    unset($log['debug']);
-                }
-            } else {
-                // 记录允许级别
-                $log = [];
-                foreach ($this->config['level'] as $level) {
-                    if (isset($this->log[$level])) {
-                        $log[$level] = $this->log[$level];
-                    }
-                }
-            }
-
-            $result = $this->driver->save($log);
-            if ($result) {
-                $this->log = [];
-            }
-
-            return $result;
         }
 
-        return true;
+        return $this->driver($channel)->save($log);
     }
 
     /**
@@ -209,29 +352,33 @@ class Log implements LoggerInterface
      * @param  mixed  $msg   调试信息
      * @param  string $type  日志级别
      * @param  bool   $force 是否强制写入
+     * @param  string $channel  日志通道
      * @return bool
      */
-    public function write($msg, $type = 'info', $force = false)
+    public function write($msg, string $type = 'info', bool $force = false, $channel = ''): bool
     {
-        // 封装日志信息
-        $log = $this->log;
+        if (empty($this->allow['*'])) {
+            $force = true;
+        }
 
-        if (true === $force || empty($this->config['level'])) {
-            $log[$type][] = $msg;
-        } elseif (in_array($type, $this->config['level'])) {
+        $log = [];
+
+        if (true === $force || in_array($type, $this->allow['*'])) {
             $log[$type][] = $msg;
         } else {
             return false;
         }
 
         // 写入日志
-        $result = $this->driver->save($log);
+        $channels = $channel ? (array) $channel : $this->channel;
 
-        if ($result) {
-            $this->log = [];
+        foreach ($channels as $channel) {
+            if (empty($this->allow[$channel]) || in_array($type, $this->allow[$channel])) {
+                $this->saveChannel($channel, $log);
+            }
         }
 
-        return $result;
+        return true;
     }
 
     /**
@@ -242,7 +389,7 @@ class Log implements LoggerInterface
      * @param  array  $context   替换内容
      * @return void
      */
-    public function log($level, $message, array $context = [])
+    public function log($level, $message, array $context = []): void
     {
         $this->record($message, $level, $context);
     }
@@ -250,11 +397,11 @@ class Log implements LoggerInterface
     /**
      * 记录emergency信息
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function emergency($message, array $context = [])
+    public function emergency($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
     }
@@ -262,11 +409,11 @@ class Log implements LoggerInterface
     /**
      * 记录警报信息
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function alert($message, array $context = [])
+    public function alert($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
     }
@@ -274,11 +421,11 @@ class Log implements LoggerInterface
     /**
      * 记录紧急情况
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function critical($message, array $context = [])
+    public function critical($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
     }
@@ -286,11 +433,11 @@ class Log implements LoggerInterface
     /**
      * 记录错误信息
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function error($message, array $context = [])
+    public function error($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
     }
@@ -298,11 +445,11 @@ class Log implements LoggerInterface
     /**
      * 记录warning信息
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function warning($message, array $context = [])
+    public function warning($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
     }
@@ -310,11 +457,11 @@ class Log implements LoggerInterface
     /**
      * 记录notice信息
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function notice($message, array $context = [])
+    public function notice($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
     }
@@ -322,11 +469,11 @@ class Log implements LoggerInterface
     /**
      * 记录一般信息
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function info($message, array $context = [])
+    public function info($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
     }
@@ -334,11 +481,11 @@ class Log implements LoggerInterface
     /**
      * 记录调试信息
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function debug($message, array $context = [])
+    public function debug($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
     }
@@ -346,12 +493,18 @@ class Log implements LoggerInterface
     /**
      * 记录sql信息
      * @access public
-     * @param  mixed  $message   日志信息
-     * @param  array  $context   替换内容
+     * @param  mixed $message 日志信息
+     * @param  array $context 替换内容
      * @return void
      */
-    public function sql($message, array $context = [])
+    public function sql($message, array $context = []): void
     {
         $this->log(__FUNCTION__, $message, $context);
+    }
+
+    public function __call($method, $args)
+    {
+        array_unshift($args, $method);
+        call_user_func_array([$this, 'log'], $args);
     }
 }
