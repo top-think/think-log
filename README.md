@@ -35,4 +35,8 @@ Log::init([
 Log::error('error info');
 Log::info('log info');
 Log::save();
+
+Log::channel('channel_name')->error('test error');
 ~~~
+
+更多内容可以参考 https://www.kancloud.cn/manual/thinkphp6_0/1037616
