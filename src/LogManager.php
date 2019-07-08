@@ -83,6 +83,8 @@ class LogManager implements LoggerInterface
     /**
      * 初始化
      * @access public
+     * @param  array $config 日志配置
+     * @return $this
      */
     public function init(array $config = [])
     {
@@ -102,6 +104,8 @@ class LogManager implements LoggerInterface
 
         $this->isCli = $this->runningInConsole();
         $this->channel();
+
+        return $this;
     }
 
     /**
